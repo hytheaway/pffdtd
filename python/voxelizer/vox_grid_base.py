@@ -25,6 +25,7 @@ from common.myfuncs import get_default_nprocs
 from tqdm import tqdm
 import common.check_version as cv
 import time
+import gc
 
 assert cv.ATLEASTVERSION38 #for shared memory (but project needs 3.9 anyway)
 
@@ -97,104 +98,110 @@ class VoxGridBase:
 
             #create shared memory
             Ntris_vox_shm = shared_memory.SharedMemory(create=True,size=Nvox*np.dtype(np.int64).itemsize)
-            Ntris_vox = np.frombuffer(Ntris_vox_shm.buf, dtype=np.int64)
-            #alternative syntax
-            #Ntris_vox = np.ndarray((Nvox,), dtype=np.int64, buffer=Ntris_vox_shm.buf)
-
-            #use as buffer view to np array
             N_tribox_tests_shm = shared_memory.SharedMemory(create=True,size=Nvox*np.dtype(np.int64).itemsize)
-            N_tribox_tests = np.frombuffer(N_tribox_tests_shm.buf, dtype=np.int64)
+            Ntris_vox = None
+            N_tribox_tests = None
+            try:
+                Ntris_vox = np.frombuffer(Ntris_vox_shm.buf, dtype=np.int64)
+                #alternative syntax
+                #Ntris_vox = np.ndarray((Nvox,), dtype=np.int64, buffer=Ntris_vox_shm.buf)
+                N_tribox_tests = np.frombuffer(N_tribox_tests_shm.buf, dtype=np.int64)
 
-            Ntris_vox[:] = 0
-            N_tribox_tests[:] = 0
+                Ntris_vox[:] = 0
+                N_tribox_tests[:] = 0
 
-            #looping through boxes makes more sense because we append to voxels (for multithreading)
-            def process_voxel(vox):
-                candidates = np.nonzero(np.all(np.logical_and(vox.bmax >= tri_bmin,vox.bmin <= tri_bmax),axis=-1))[0]
-                tri_idxs_vox = []
-                N_tribox_tests[vox.idx] += candidates.size
-                hits = tri_box_intersection_vec(vox.bmin,vox.bmax,tris_pre[candidates])
-                tri_idxs_vox = candidates[hits].tolist()
-                return tri_idxs_vox
+                #looping through boxes makes more sense because we append to voxels (for multithreading)
+                def process_voxel(vox):
+                    candidates = np.nonzero(np.all(np.logical_and(vox.bmax >= tri_bmin,vox.bmin <= tri_bmax),axis=-1))[0]
+                    tri_idxs_vox = []
+                    N_tribox_tests[vox.idx] += candidates.size
+                    hits = tri_box_intersection_vec(vox.bmin,vox.bmax,tris_pre[candidates])
+                    tri_idxs_vox = candidates[hits].tolist()
+                    return tri_idxs_vox
 
-            def process_voxels(vidx_list,proc_idx):
-                pbar = tqdm(total=len(vidx_list),desc=f'process {proc_idx:02d} voxgrid processing',ascii=True,leave=False,position=0)
-                for vox_idx in vidx_list:
-                    tri_idxs_vox = process_voxel(self.voxels[vox_idx])
-                    Ntris_vox[vox_idx] = len(tri_idxs_vox)
-                    #if not empty, save vox data as file
-                    if len(tri_idxs_vox)>0:
-                        np.array(tri_idxs_vox,dtype=np.int64).tofile(f'mmap_dat/vox_{vox_idx}.dat')
-                    pbar.update(1)
+                def process_voxels(vidx_list,proc_idx):
+                    pbar = tqdm(total=len(vidx_list),desc=f'process {proc_idx:02d} voxgrid processing',ascii=True,leave=False,position=0)
+                    for vox_idx in vidx_list:
+                        tri_idxs_vox = process_voxel(self.voxels[vox_idx])
+                        Ntris_vox[vox_idx] = len(tri_idxs_vox)
+                        #if not empty, save vox data as file
+                        if len(tri_idxs_vox)>0:
+                            np.array(tri_idxs_vox,dtype=np.int64).tofile(f'mmap_dat/vox_{vox_idx}.dat')
+                        pbar.update(1)
 
-                pbar.close()
+                    pbar.close()
 
-            
-            if Nprocs==1: #keep separate for debug purposes
-                #process without intermediate files
-                pbar = tqdm(total=Nvox,desc=f'single process voxgrid processing',ascii=True,leave=False)
-                for vox_idx in range(Nvox):
-                    vox = self.voxels[vox_idx]
-                    tri_idxs_vox = process_voxel(vox)
-                    Ntris_vox[vox_idx] = len(tri_idxs_vox)
-                    pbar.update(1)
-                    if Ntris_vox[vox_idx]>0:
-                        vox.tri_idxs = tri_idxs_vox
-                        vox.tris_pre = self.tris_pre[vox.tri_idxs]
-                        vox.tris_mat = self.mats[vox.tri_idxs]
-                        assert Ntris_vox[vox_idx] == len(vox.tri_idxs)
-                        self.nonempty_idx.append(vox_idx)
-                pbar.close()
+                if Nprocs==1: #keep separate for debug purposes
+                    #process without intermediate files
+                    pbar = tqdm(total=Nvox,desc=f'single process voxgrid processing',ascii=True,leave=False)
+                    for vox_idx in range(Nvox):
+                        vox = self.voxels[vox_idx]
+                        tri_idxs_vox = process_voxel(vox)
+                        Ntris_vox[vox_idx] = len(tri_idxs_vox)
+                        pbar.update(1)
+                        if Ntris_vox[vox_idx]>0:
+                            vox.tri_idxs = tri_idxs_vox
+                            vox.tris_pre = self.tris_pre[vox.tri_idxs]
+                            vox.tris_mat = self.mats[vox.tri_idxs]
+                            assert Ntris_vox[vox_idx] == len(vox.tri_idxs)
+                            self.nonempty_idx.append(vox_idx)
+                    pbar.close()
 
-            elif Nprocs>1:
-                procs = []
+                elif Nprocs>1:
+                    procs = []
 
-                vox_idx_lists = [[] for i in range(Nprocs)]
-                vox_order = np.random.permutation(Nvox)
-                #vox_order = np.arange(Nvox)
-                for idx in range(Nvox):
-                    cc = np.argmin([len(l) for l in vox_idx_lists])
-                    vox_idx_lists[cc].append(vox_order[idx])
+                    vox_idx_lists = [[] for i in range(Nprocs)]
+                    vox_order = np.random.permutation(Nvox)
+                    #vox_order = np.arange(Nvox)
+                    for idx in range(Nvox):
+                        cc = np.argmin([len(l) for l in vox_idx_lists])
+                        vox_idx_lists[cc].append(vox_order[idx])
 
-                for proc_idx in range(Nprocs):
-                    proc = mp.Process(target=process_voxels, args=(vox_idx_lists[proc_idx],proc_idx))
-                    procs.append(proc)
+                    for proc_idx in range(Nprocs):
+                        proc = mp.Process(target=process_voxels, args=(vox_idx_lists[proc_idx],proc_idx))
+                        procs.append(proc)
 
-                for proc_idx in range(Nprocs):
-                    procs[proc_idx].start()
+                    for proc_idx in range(Nprocs):
+                        procs[proc_idx].start()
 
-                for one_proc in procs:
-                    one_proc.join()
+                    for one_proc in procs:
+                        one_proc.join()
 
-                #now load from temp files
-                for vox_idx in range(Nvox):
-                    vox = self.voxels[vox_idx]
-                    if Ntris_vox[vox_idx]>0:
-                        #now with one process read data from files
-                        vox.tri_idxs = np.fromfile(f'mmap_dat/vox_{vox_idx}.dat',dtype=np.int64)
-                        vox.tris_pre = self.tris_pre[vox.tri_idxs]
-                        vox.tris_mat = self.mats[vox.tri_idxs]
-                        assert Ntris_vox[vox_idx] == len(vox.tri_idxs)
-                        self.nonempty_idx.append(vox_idx)
+                    #now load from temp files
+                    for vox_idx in range(Nvox):
+                        vox = self.voxels[vox_idx]
+                        if Ntris_vox[vox_idx]>0:
+                            #now with one process read data from files
+                            vox.tri_idxs = np.fromfile(f'mmap_dat/vox_{vox_idx}.dat',dtype=np.int64)
+                            vox.tris_pre = self.tris_pre[vox.tri_idxs]
+                            vox.tris_mat = self.mats[vox.tri_idxs]
+                            assert Ntris_vox[vox_idx] == len(vox.tri_idxs)
+                            self.nonempty_idx.append(vox_idx)
 
-                clear_dat_folder('mmap_dat')
+                    clear_dat_folder('mmap_dat')
 
-            self.print(self.timer.ftoc('voxgrid fill'))
+                self.print(self.timer.ftoc('voxgrid fill'))
 
-            Ntris_vox_tot = np.sum(Ntris_vox)
-
-            N_tribox_tests_tot = np.sum(N_tribox_tests)
-            self.print(f'tribox checks={N_tribox_tests_tot} for {Ntris} tris and {Nvox} vox ({N_tribox_tests_tot/(Nvox*Ntris)*100.0:.2f} %)')
-
-            #cleanup shared memory
-            Ntris_vox_shm.close()
-            Ntris_vox_shm.unlink()
-
-            N_tribox_tests_shm.close()
-            N_tribox_tests_shm.unlink()
-
-            self.print(f'tris redundant={Ntris_vox_tot}, {100.*Ntris_vox_tot/self.Ntris:.2f} %')
-            self.print(f'avg tris per voxel={Ntris_vox_tot/Nvox:.2f}')
+                Ntris_vox_tot = np.sum(Ntris_vox)
+                N_tribox_tests_tot = np.sum(N_tribox_tests)
+                self.print(f'tribox checks={N_tribox_tests_tot} for {Ntris} tris and {Nvox} vox ({N_tribox_tests_tot/(Nvox*Ntris)*100.0:.2f} %)')
+                self.print(f'tris redundant={Ntris_vox_tot}, {100.*Ntris_vox_tot/self.Ntris:.2f} %')
+                self.print(f'avg tris per voxel={Ntris_vox_tot/Nvox:.2f}')
+            finally:
+                #release all buffer views before closing shared memory segments
+                try:
+                    del process_voxel, process_voxels
+                except UnboundLocalError:
+                    pass
+                if Ntris_vox is not None:
+                    del Ntris_vox
+                if N_tribox_tests is not None:
+                    del N_tribox_tests
+                gc.collect()
+                Ntris_vox_shm.close()
+                Ntris_vox_shm.unlink()
+                N_tribox_tests_shm.close()
+                N_tribox_tests_shm.unlink()
 
     def print(self,fstring):
         print(f'--VOX_GRID_BASE: {fstring}')
