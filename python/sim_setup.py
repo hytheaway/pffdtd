@@ -14,8 +14,14 @@
 
 import numpy as np
 import json as json
+import os
 from pathlib import Path
 from numpy import array as npa
+
+# NumPy 2.x compatibility shim for older VTK/Mayavi stacks.
+if not hasattr(np, 'in1d'):
+    np.in1d = np.isin
+
 from common.room_geo import RoomGeo
 from voxelizer.cart_grid import CartGrid
 from voxelizer.vox_grid import VoxGrid
@@ -25,6 +31,22 @@ from fdtd.sim_consts import SimConsts
 from fdtd.sim_mats import SimMats
 from fdtd.rotate_sim_data import rotate_sim_data,sort_sim_data,copy_sim_data,fold_fcc_sim_data
 from air_abs.get_air_absorption import get_air_absorption
+
+def _prepare_mayavi_env():
+    # Prefer PyQt5 + Qt backend for Traits/Mayavi.
+    os.environ.setdefault('QT_API', 'pyqt5')
+    os.environ.setdefault('ETS_TOOLKIT', 'qt')
+    # Mayavi/VTK are typically most stable on XCB; allow override via env.
+    # Set PFFDTD_QT_PLATFORM=wayland to force Wayland instead.
+    os.environ.setdefault('QT_QPA_PLATFORM', os.environ.get('PFFDTD_QT_PLATFORM', 'xcb'))
+    # In mixed Wayland/XWayland sessions, force xcb to avoid BadWindow crashes.
+    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland' and os.environ.get('PFFDTD_QT_PLATFORM') is None:
+        os.environ['QT_QPA_PLATFORM'] = 'xcb'
+    # Include common system plugin paths so conda Qt can find wayland/xcb plugins.
+    plugin_paths = [os.environ.get('QT_PLUGIN_PATH', ''), '/usr/lib/qt/plugins', '/usr/lib/qt6/plugins']
+    plugin_paths = [p for p in plugin_paths if p]
+    if plugin_paths:
+        os.environ['QT_PLUGIN_PATH'] = ':'.join(dict.fromkeys(plugin_paths))
 
 def sim_setup(
                 #the following are required but using None default so not positional
@@ -136,6 +158,8 @@ def sim_setup(
     #draw the voxelisation (use polyscope for dense grids)
     if draw_vox:
         backend = draw_backend
+        if backend == 'mayavi':
+            _prepare_mayavi_env()
         try:
             room_geo.draw(wireframe=False,backend=backend)
             vox_scene.draw(backend=backend)
