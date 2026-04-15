@@ -18,6 +18,7 @@
 
 import numpy as np
 import json as json
+import os
 from numpy import array as npa
 from common.tris_precompute import tris_precompute
 from common.myfuncs import dotv,vecnorm
@@ -237,8 +238,12 @@ class RoomGeo:
             mlab.plot3d(*fake_verts,transparent=True,opacity=0)
             mlab.axes(xlabel='x', ylabel='y', zlabel='z', color=(0., 0., 0.))
 
-            #fix z-up
-            fig.scene.interactor.interactor_style = tvtk.InteractorStyleTerrain()
+            #fix z-up; this interactor style can crash on some Qt/VTK backends.
+            if os.environ.get('PFFDTD_MAYAVI_TERRAIN_STYLE', '0') == '1':
+                try:
+                    fig.scene.interactor.interactor_style = tvtk.InteractorStyleTerrain()
+                except Exception as exc:
+                    self.print(f'skipping Terrain interactor style: {exc}')
 
         elif backend == 'polyscope':
             import polyscope as ps
