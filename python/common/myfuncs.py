@@ -26,7 +26,7 @@ import hashlib
 import multiprocessing as mp
 import scipy.io.wavfile
 
-EPS = np.finfo(np.float).eps
+EPS = np.finfo(float).eps
 
 def rotmatrix_ax_ang(Rax:Any, Rang:float):
     assert isinstance(Rax,np.ndarray)
@@ -126,15 +126,15 @@ def normalise(v1,eps=EPS):
 
 def ceilint(x:float):
     assert isinstance(x,float)
-    return np.int_(np.ceil(x))
+    return int(np.ceil(x))
 
 def roundint(x:float):
     assert isinstance(x,float)
-    return np.int_(np.round(x))
+    return int(np.round(x))
 
 def floorint(x:float):
     assert isinstance(x,float)
-    return np.int_(np.floor(x))
+    return int(np.floor(x))
 
 def maxabs(x:Any):
     assert_np_array_complex(x)
@@ -253,17 +253,17 @@ def yes_or_no(question):
             return False
 
 def iceil(x):
-    return np.int_(np.ceil(x))
+    return int(np.ceil(x))
 
 def iround(x):
-    return np.int_(np.round(x))
+    return int(np.round(x))
 
 def wavread(fname):
     SR,data = scipy.io.wavfile.read(fname) #reads in (Nsamples,Nchannels)
     if data.dtype == np.int16:
         data = data/32768.0
-        SR = np.float_(SR)
-    return SR,np.float_(data.T)
+        SR = float(SR)
+    return SR,data.T.astype(np.float64)
 
 def wavwrite(fname,SR,data):
     data = np.atleast_2d(data) #expects (Nchannels,Nsamples), this will also assert that
