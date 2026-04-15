@@ -135,6 +135,18 @@ def sim_setup(
 
     #draw the voxelisation (use polyscope for dense grids)
     if draw_vox:
-        room_geo.draw(wireframe=False,backend=draw_backend)
-        vox_scene.draw(backend=draw_backend)
-        room_geo.show(backend=draw_backend)
+        backend = draw_backend
+        try:
+            room_geo.draw(wireframe=False,backend=backend)
+            vox_scene.draw(backend=backend)
+            room_geo.show(backend=backend)
+        except Exception as exc:
+            # Mayavi can fail on newer NumPy/Qt stacks; fall back to polyscope.
+            if backend == 'mayavi':
+                print(f'--SIM_SETUP: draw with mayavi failed: {exc}')
+                print('--SIM_SETUP: falling back to polyscope backend')
+                room_geo.draw(wireframe=False,backend='polyscope')
+                vox_scene.draw(backend='polyscope')
+                room_geo.show(backend='polyscope')
+            else:
+                raise
