@@ -48,6 +48,7 @@ from pathlib import Path
 import numba as nb
 import sys
 import h5py
+import gc
 
 import psutil
 
@@ -125,8 +126,7 @@ class VoxScene:
 
         #set up shared memory
         Nb_proc_shm = shared_memory.SharedMemory(create=True,size=Nprocs*np.dtype(np.int64).itemsize)
-        Nb_proc = np.frombuffer(Nb_proc_shm.buf,dtype=np.int64)
-        Nb_proc[:] = 0 
+        Nb_proc = None
 
         NN = self.NN
 
@@ -143,188 +143,201 @@ class VoxScene:
 
         clear_dat_folder(DAT_FOLDER)
 
-        #this is main function called by mp
-        def process_voxel(idx,proc_idx):
-            vox_idx = vg.nonempty_idx[idx]
-            vox = vg.voxels[vox_idx]
+        try:
+            Nb_proc = np.frombuffer(Nb_proc_shm.buf,dtype=np.int64)
+            Nb_proc[:] = 0
 
-            ##voxel start indices (absolute) and including halos
-            ix_start,iy_start,iz_start = vox.ixyz_start
-            #these are widths of voxel, but number points is plus one
-            Nhx,Nhy,Nhz = vox.Nhxyz
+            #this is main function called by mp
+            def process_voxel(idx,proc_idx):
+                vox_idx = vg.nonempty_idx[idx]
+                vox = vg.voxels[vox_idx]
 
-            vox_shape = (Nhx,Nhy,Nhz) #in points
+                ##voxel start indices (absolute) and including halos
+                ix_start,iy_start,iz_start = vox.ixyz_start
+                #these are widths of voxel, but number points is plus one
+                Nhx,Nhy,Nhz = vox.Nhxyz
 
-            #local indices for vox
-            ix_vox,iy_vox,iz_vox = np.mgrid[0:Nhx,0:Nhy,0:Nhz]
+                vox_shape = (Nhx,Nhy,Nhz) #in points
 
-            vox_ndist = np.full(vox_shape,np.inf,dtype=np.float64) #distance to nearest hit
-            vox_bp = np.full(vox_shape,False,dtype=np.bool8) #boundary point?
-            vox_adj = np.full((*vox_shape,NN),True,dtype=np.bool8) #adjacency to neighbours
-            vox_nb = np.full(vox_shape,False,dtype=np.bool8) #near a boundary (nothing to do with numba)
-            vox_tidx = np.full(vox_shape,-1,dtype=np.int32) #tri index for nearest hit
+                #local indices for vox
+                ix_vox,iy_vox,iz_vox = np.mgrid[0:Nhx,0:Nhy,0:Nhz]
 
-            #to store distances to tris
-            hit_dist = np.full(vox_shape,np.inf)
+                vox_ndist = np.full(vox_shape,np.inf,dtype=np.float64) #distance to nearest hit
+                vox_bp = np.full(vox_shape,False,dtype=np.bool_) #boundary point?
+                vox_adj = np.full((*vox_shape,NN),True,dtype=np.bool_) #adjacency to neighbours
+                vox_nb = np.full(vox_shape,False,dtype=np.bool_) #near a boundary (nothing to do with numba)
+                vox_tidx = np.full(vox_shape,-1,dtype=np.int32) #tri index for nearest hit
 
-            xyz_vox = np.c_[xv[ix_start+ix_vox.flat[:]],\
-                            yv[iy_start+iy_vox.flat[:]],\
-                            zv[iz_start+iz_vox.flat[:]]]
-            in_mask = np.full(vox_shape,False)
-            in_mask[1:-1,1:-1,1:-1] = True,
+                #to store distances to tris
+                hit_dist = np.full(vox_shape,np.inf)
 
-            if self.fcc:
-                fcc_mask = (np.mod(ix_start+ix_vox+iy_start+iy_vox+iz_start+iz_vox,2)==0)
-            else:
-                fcc_mask = np.full(vox_shape,True)
+                xyz_vox = np.c_[xv[ix_start+ix_vox.flat[:]],\
+                                yv[iy_start+iy_vox.flat[:]],\
+                                zv[iz_start+iz_vox.flat[:]]]
+                in_mask = np.full(vox_shape,False)
+                in_mask[1:-1,1:-1,1:-1] = True,
 
-            #loop through triangles in voxel
-            for tri_pre,tri_ind in zip(vox.tris_pre,vox.tri_idxs):
-                cent = tri_pre['cent']
-                unor = tri_pre['unor']
-                tbmin = tri_pre['bmin']
-                tbmax = tri_pre['bmax']
-                #first mask by bounding box
-                bb_mask = (np.all(xyz_vox >= tbmin - hf*(1+R_EPS),axis=-1) \
-                         & np.all(xyz_vox <= tbmax + hf*(1+R_EPS),axis=-1)).reshape(vox_shape)
+                if self.fcc:
+                    fcc_mask = (np.mod(ix_start+ix_vox+iy_start+iy_vox+iz_start+iz_vox,2)==0)
+                else:
+                    fcc_mask = np.full(vox_shape,True)
 
-                #bb_mask &= in_mask.flat[:] #inside halo
+                #loop through triangles in voxel
+                for tri_pre,tri_ind in zip(vox.tris_pre,vox.tri_idxs):
+                    cent = tri_pre['cent']
+                    unor = tri_pre['unor']
+                    tbmin = tri_pre['bmin']
+                    tbmax = tri_pre['bmax']
+                    #first mask by bounding box
+                    bb_mask = (np.all(xyz_vox >= tbmin - hf*(1+R_EPS),axis=-1) \
+                             & np.all(xyz_vox <= tbmax + hf*(1+R_EPS),axis=-1)).reshape(vox_shape)
 
-                bb_mask &= fcc_mask
-                if ~np.any(bb_mask):
-                    continue
+                    #bb_mask &= in_mask.flat[:] #inside halo
 
-                #then mask by distance to plane
-                dtp = np.full(vox_shape,np.inf,dtype=np.float64)
-                dtp.flat[bb_mask.flat[:]] = dotv(unor,cent-xyz_vox[bb_mask.flat[:]]) 
-                dist_mask1 = (np.abs(dtp)<= hf*(1+R_EPS))
-                if ~np.any(dist_mask1):
-                    continue
-
-                ray_mask = dist_mask1
-                tnb_mask = np.full(vox_shape,False) #this is reset at triangle, accumulates across directions
-                for k in range(0,NN):
-                    ray_o = xyz_vox[ray_mask.flat[:]]-vvh[k]
-                    rd = uvv[k]
-
-                    ray_d = rd*np.ones(ray_o.shape)
-                
-                    #returns np.inf or dist>0 if hit
-                    hit_dist = np.full(vox_shape,np.inf)
-                    _,hit_dist.flat[ray_mask.flat[:]] = tri_ray_intersection_vec(ray_o,ray_d,npa([tri_pre]),d_eps=1.0e-3*h)
-
-                    assert np.all(hit_dist>=0.0)
-                    hit_dist -= hf #shift, doesn't affect np.inf entries
-                    hit_dist[hit_dist<-R_EPS*hf] = np.inf #overwrite hits behind point 
-
-                    tnb_mask |= (np.abs(hit_dist)<=R_EPS*hf)
-                    hit_dist[tnb_mask] = np.abs(hit_dist[tnb_mask]) #so ndist is positive
-                    vox_nb |= tnb_mask
-
-                    if ~np.any(hit_dist<=hf):
+                    bb_mask &= fcc_mask
+                    if ~np.any(bb_mask):
                         continue
-                    hit_dist[hit_dist>(1+R_EPS)*hf] = np.inf #zero those out so they don't interfere
 
-                    ii0 = np.flatnonzero(hit_dist<=(1+R_EPS)*hf) #linear indices
+                    #then mask by distance to plane
+                    dtp = np.full(vox_shape,np.inf,dtype=np.float64)
+                    dtp.flat[bb_mask.flat[:]] = dotv(unor,cent-xyz_vox[bb_mask.flat[:]]) 
+                    dist_mask1 = (np.abs(dtp)<= hf*(1+R_EPS))
+                    if ~np.any(dist_mask1):
+                        continue
 
-                    #mark non-adjencies (later use to detect boundary nodes)
-                    vox_adj.reshape(-1,NN)[ii0,k] = False
-                    vox_bp.flat[ii0] = True
+                    ray_mask = dist_mask1
+                    tnb_mask = np.full(vox_shape,False) #this is reset at triangle, accumulates across directions
+                    for k in range(0,NN):
+                        ray_o = xyz_vox[ray_mask.flat[:]]-vvh[k]
+                        rd = uvv[k]
 
-                    #indices where new nearest hit 
-                    nh_mask = np.full(vox_shape,False)
-                    nh_mask.flat[ii0] =  (hit_dist.flat[ii0] < vox_ndist.flat[ii0])
-                    vox_ndist[nh_mask] = hit_dist[nh_mask] #update to abs for neg dist
-                    vox_tidx[nh_mask] = tri_ind
+                        ray_d = rd*np.ones(ray_o.shape)
+                
+                        #returns np.inf or dist>0 if hit
+                        hit_dist = np.full(vox_shape,np.inf)
+                        _,hit_dist.flat[ray_mask.flat[:]] = tri_ray_intersection_vec(ray_o,ray_d,npa([tri_pre]),d_eps=1.0e-3*h)
 
-                #NB can have fictitious boundary faces at edges
-                #leg on correct side but not overtop triangle... (since intersection not registered)
-                #..same problem with jordan's theorem tests
+                        assert np.all(hit_dist>=0.0)
+                        hit_dist -= hf #shift, doesn't affect np.inf entries
+                        hit_dist[hit_dist<-R_EPS*hf] = np.inf #overwrite hits behind point 
+
+                        tnb_mask |= (np.abs(hit_dist)<=R_EPS*hf)
+                        hit_dist[tnb_mask] = np.abs(hit_dist[tnb_mask]) #so ndist is positive
+                        vox_nb |= tnb_mask
+
+                        if ~np.any(hit_dist<=hf):
+                            continue
+                        hit_dist[hit_dist>(1+R_EPS)*hf] = np.inf #zero those out so they don't interfere
+
+                        ii0 = np.flatnonzero(hit_dist<=(1+R_EPS)*hf) #linear indices
+
+                        #mark non-adjencies (later use to detect boundary nodes)
+                        vox_adj.reshape(-1,NN)[ii0,k] = False
+                        vox_bp.flat[ii0] = True
+
+                        #indices where new nearest hit 
+                        nh_mask = np.full(vox_shape,False)
+                        nh_mask.flat[ii0] =  (hit_dist.flat[ii0] < vox_ndist.flat[ii0])
+                        vox_ndist[nh_mask] = hit_dist[nh_mask] #update to abs for neg dist
+                        vox_tidx[nh_mask] = tri_ind
+
+                    #NB can have fictitious boundary faces at edges
+                    #leg on correct side but not overtop triangle... (since intersection not registered)
+                    #..same problem with jordan's theorem tests
  
-                #finally zero out nb points 
-                vox_adj.reshape(-1,NN)[vox_nb.flat[:],:]=False
+                    #finally zero out nb points 
+                    vox_adj.reshape(-1,NN)[vox_nb.flat[:],:]=False
 
-                assert np.all(~vox_adj.reshape(-1,NN)[tnb_mask.flat[:],:])
+                    assert np.all(~vox_adj.reshape(-1,NN)[tnb_mask.flat[:],:])
 
-            vox_adj = vox_adj.reshape((-1,NN))
-            assert np.all(~vox_adj[vox_nb.flat[:],:])
+                vox_adj = vox_adj.reshape((-1,NN))
+                assert np.all(~vox_adj[vox_nb.flat[:],:])
 
-            vox_adj[~in_mask.flat[:],:] = True
-            vox_bp[~in_mask] = False
-            vox_tidx[~in_mask] = -1 #just so doesn't go into surface-area correction calc
+                vox_adj[~in_mask.flat[:],:] = True
+                vox_bp[~in_mask] = False
+                vox_tidx[~in_mask] = -1 #just so doesn't go into surface-area correction calc
 
-            #now extract boundary points (redundant)
-            qq = np.flatnonzero(np.any(~vox_adj,axis=-1))
-            qq2 = np.flatnonzero(vox_bp.flat[:])
-            #print(f'{qq.size=}')
+                #now extract boundary points (redundant)
+                qq = np.flatnonzero(np.any(~vox_adj,axis=-1))
+                qq2 = np.flatnonzero(vox_bp.flat[:])
+                #print(f'{qq.size=}')
 
-            assert qq.size == qq2.size
-            #assert np.intersect1d(qq,qq2).size == qq2.size
-            assert np.all(qq==qq2)
-            #tally boundary points inside vox without halo (add on to tally for process)
-            Nb_proc[proc_idx] += np.sum(vox_bp.flat[:])
+                assert qq.size == qq2.size
+                #assert np.intersect1d(qq,qq2).size == qq2.size
+                assert np.all(qq==qq2)
+                #tally boundary points inside vox without halo (add on to tally for process)
+                Nb_proc[proc_idx] += np.sum(vox_bp.flat[:])
 
-            ndist_bn_vox = vox_ndist.flat[qq]
-            tidx_bn_vox = vox_tidx.flat[qq]
-            assert np.all(tidx_bn_vox>=-1) #all marked
+                ndist_bn_vox = vox_ndist.flat[qq]
+                tidx_bn_vox = vox_tidx.flat[qq]
+                assert np.all(tidx_bn_vox>=-1) #all marked
 
-            adj_bn_vox = vox_adj[qq,:]
-            bn_ixyz_loc_vox = qq
+                adj_bn_vox = vox_adj[qq,:]
+                bn_ixyz_loc_vox = qq
 
-            #store vox info on disk (variable size, can't use shared mem), no compression for speed
-            h5f_vox = h5py.File(Path(DAT_FOLDER) / Path(f'vox_data_{vox.idx}.h5'),'w')
-            h5f_vox.create_dataset('adj_bn', data=adj_bn_vox)
-            h5f_vox.create_dataset('tidx_bn', data=tidx_bn_vox)
-            h5f_vox.create_dataset('ndist_bn', data=ndist_bn_vox)
-            h5f_vox.create_dataset('bn_ixyz_loc', data=bn_ixyz_loc_vox)
-            h5f_vox.close()
+                #store vox info on disk (variable size, can't use shared mem), no compression for speed
+                h5f_vox = h5py.File(Path(DAT_FOLDER) / Path(f'vox_data_{vox.idx}.h5'),'w')
+                h5f_vox.create_dataset('adj_bn', data=adj_bn_vox)
+                h5f_vox.create_dataset('tidx_bn', data=tidx_bn_vox)
+                h5f_vox.create_dataset('ndist_bn', data=ndist_bn_vox)
+                h5f_vox.create_dataset('bn_ixyz_loc', data=bn_ixyz_loc_vox)
+                h5f_vox.close()
 
-        def process_voxels(idx_list,proc_idx):
-            #using one progress bar because tqdm has problems with multiple, and cleaner 
-            pbar = tqdm(total=len(idx_list),desc=f'process {proc_idx:02d} voxeliser processing',ascii=True,leave=False,position=0)
-            for idx in idx_list:
-                process_voxel(idx,proc_idx)
-                pbar.update(1)
-            pbar.close()
+            def process_voxels(idx_list,proc_idx):
+                #using one progress bar because tqdm has problems with multiple, and cleaner 
+                pbar = tqdm(total=len(idx_list),desc=f'process {proc_idx:02d} voxeliser processing',ascii=True,leave=False,position=0)
+                for idx in idx_list:
+                    process_voxel(idx,proc_idx)
+                    pbar.update(1)
+                pbar.close()
 
-        self.timer.tic('calc_adj total')
-        self.timer.tic('ray-tri checks')
+            self.timer.tic('calc_adj total')
+            self.timer.tic('ray-tri checks')
 
-        if Nprocs==1: #no need to use mp
-            process_voxels(range(Nvox_nonempty),0)
+            if Nprocs==1: #no need to use mp
+                process_voxels(range(Nvox_nonempty),0)
 
-        else: #multiproc with vox grid
-            procs = []
-            idx_lists = [[] for i in range(Nprocs)]
-            #only random shuffle for balancing
-            vox_order = np.random.permutation(Nvox_nonempty)
-            for qq in range(Nvox_nonempty):
-                cc = np.argmin([len(l) for l in idx_lists])
-                idx_lists[cc].append(vox_order[qq])
+            else: #multiproc with vox grid
+                procs = []
+                idx_lists = [[] for i in range(Nprocs)]
+                #only random shuffle for balancing
+                vox_order = np.random.permutation(Nvox_nonempty)
+                for qq in range(Nvox_nonempty):
+                    cc = np.argmin([len(l) for l in idx_lists])
+                    idx_lists[cc].append(vox_order[qq])
 
-            for proc_idx in range(Nprocs):
-                idx_list = idx_lists[proc_idx]
-                proc = mp.Process(target=process_voxels, args=(idx_list,proc_idx))
-                procs.append(proc)
+                for proc_idx in range(Nprocs):
+                    idx_list = idx_lists[proc_idx]
+                    proc = mp.Process(target=process_voxels, args=(idx_list,proc_idx))
+                    procs.append(proc)
 
-            for proc_idx in range(Nprocs):
-                procs[proc_idx].start()
+                for proc_idx in range(Nprocs):
+                    procs[proc_idx].start()
 
-            for one_proc in procs:
-                one_proc.join()
+                for one_proc in procs:
+                    one_proc.join()
+                failed = [i for i, one_proc in enumerate(procs) if one_proc.exitcode != 0]
+                if failed:
+                    raise RuntimeError(f'voxeliser worker processes failed: {failed}')
 
-        self.print(self.timer.ftoc('ray-tri checks'))
+            self.print(self.timer.ftoc('ray-tri checks'))
 
-        self.timer.tic('consolidate')
+            self.timer.tic('consolidate')
 
-        #total number of boundary points, to allocate unified arrays
-        Nbt = np.sum(Nb_proc)
-        self.print(f'{Nbt=}')
-
-        #clean up shared memory
-        Nb_proc_shm.close()
-        Nb_proc_shm.unlink()
-        #self.print(f'unlink')
+            #total number of boundary points, to allocate unified arrays
+            Nbt = int(np.sum(Nb_proc))
+            self.print(f'{Nbt=}')
+        finally:
+            #release all buffer views before closing shared memory segments
+            try:
+                del process_voxel, process_voxels
+            except UnboundLocalError:
+                pass
+            if Nb_proc is not None:
+                del Nb_proc
+            gc.collect()
+            Nb_proc_shm.close()
+            Nb_proc_shm.unlink()
 
         #unified arrays
         bn_ixyz = np.full((Nbt,),-1,dtype=np.int64)
