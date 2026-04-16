@@ -1,10 +1,27 @@
 # PFFDTD (pretty fast FDTD)
 
-**This fork is intended for Arch Linux running Wayland _without_ GPU acceleration (at the moment).**
+**This fork is intended for Arch Linux running Wayland _without_ GPU
+acceleration (at the moment).**
+
+Should be ran on Linux, macOS and Windows have basic pickling issues. Don't
+bother with pip, use conda instead. numpy _must_ be below 2.0 if you want to
+use mayavi, I used 1.26.4. Else, fallback to polyscope. For compatibility,
+you may also want to use a version of Python close to 3.9 - I included
+3.11.15.
+
+When running fdtd/sim_fdtd.py, the command that works for me is:
+`PYTHON=./python python -m fdtd.sim_fdtd --data_dir ~/dev/GitHub_Local/Repositories/pffdtd/data/sim_data/ctk_cart/viz` (or similar) ran
+from repo root.
 
 ![PFFDTD Screenshot](https://github.com/bsxfun/pffdtd/raw/main/screenshot.png)
 
-PFFDTD is an implementation of finite-difference time-domain (FDTD) simulation for 3D room acoustics, which includes an accompanying set of tools for simulation setup and processing of input/output signals. This software is intended for research use with powerful workstations or single-node remote servers with one or more Nvidia GPUs (using CUDA). PFFDTD was designed be "pretty fast" when run on GPUs – at least for FDTD simulations (the name is mostly intended as a pun).
+PFFDTD is an implementation of finite-difference time-domain (FDTD) simulation
+for 3D room acoustics, which includes an accompanying set of tools for
+simulation setup and processing of input/output signals. This software
+is intended for research use with powerful workstations or single-node remote
+servers with one or more Nvidia GPUs (using CUDA). PFFDTD was designed be
+"pretty fast" when run on GPUs – at least for FDTD simulations (the name is
+mostly intended as a pun).
 
 ## Features
 
