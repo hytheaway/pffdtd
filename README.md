@@ -10,7 +10,7 @@ you may also want to use a version of Python close to 3.9 - I included
 3.11.15.
 
 When running fdtd/sim_fdtd.py, the command that works for me is:
-`PYTHON=./python python -m fdtd.sim_fdtd --data_dir ~/dev/GitHub_Local/Repositories/pffdtd/data/sim_data/ctk_cart/viz` (or similar) ran
+`PYTHON=./python python -m fdtd.sim_fdtd --data_dir [repo_root]/pffdtd/data/sim_data/ctk_cart/viz` (or similar) ran
 from repo root.
 
 ![PFFDTD Screenshot](https://github.com/bsxfun/pffdtd/raw/main/screenshot.png)
