@@ -31,6 +31,8 @@ from common.myfuncs import wavwrite,iceil,iround
 
 FREQ_MIN_HZ = 20.0
 FREQ_MAX_HZ = 20e3
+# Single resample after initial_process: all later steps (lowpass, air absorption, FFT plots) run at this rate.
+PERCEPTUAL_OUTPUT_FS = 48_000.0
 
 #class to process sim_outs.h5 file
 class ProcessOutputs: 
@@ -156,14 +158,17 @@ class ProcessOutputs:
             
         self.r_out_f = r_out_f
 
-    #resample with resampy, 48kHz default 
-    def resample(self,Fs_f=48e3):
-        Fs = self.Fs #raw Fs
-        if Fs==Fs_f:
+    # Resample once (native simulation rate -> PERCEPTUAL_OUTPUT_FS) before further processing.
+    def resample(self,Fs_f=None):
+        if Fs_f is None:
+            Fs_f = PERCEPTUAL_OUTPUT_FS
+        Fs = self.Fs  # native rate from sim_consts
+        if Fs == Fs_f:
+            self.print(f'already at {Fs_f:g} Hz; skipping resample')
             return
         r_out_f = self.r_out_f
 
-        self.print(f'resampling')
+        self.print(f'resampling once: {Fs:g} Hz -> {Fs_f:g} Hz')
         r_out_f = resample(r_out_f, Fs, Fs_f, filter='kaiser_best')
 
         self.Fs_f = Fs_f
@@ -365,7 +370,8 @@ def main():
     parser.add_argument('--data_dir', type=str,help='run directory')
     parser.add_argument('--plot', action='store_true',help='plot filtered outputs')
     parser.add_argument('--plot_raw', action='store_true',help='plot raw outputs')
-    parser.add_argument('--resample_Fs', type=float,help='output Fs for processed outputs')
+    parser.add_argument('--resample_Fs', type=float, default=PERCEPTUAL_OUTPUT_FS,
+                        help=f'single resample target after initial_process (default {PERCEPTUAL_OUTPUT_FS:g} Hz). Use 0 to keep native simulation rate.')
     parser.add_argument('--fcut_lowcut', type=float,help='')
     parser.add_argument('--fcut_lowpass', type=float,help='')
     parser.add_argument('--N_order_lowcut', type=int,help='butter order lowcut (eg. 10Hz)')
@@ -378,7 +384,6 @@ def main():
     parser.set_defaults(plot=False)
     parser.set_defaults(plot_raw=False)
     parser.set_defaults(data_dir=None)
-    parser.set_defaults(resample_Fs=48e3)
     parser.set_defaults(air_abs_filter='none')
     parser.set_defaults(save_wav=False)
     parser.set_defaults(N_order_lowpass=8)
@@ -396,8 +401,10 @@ def main():
     fcut_lowcut = max(args.fcut_lowcut,FREQ_MIN_HZ)
     po.initial_process(fcut=fcut_lowcut,N_order=args.N_order_lowcut)
 
-    if args.resample_Fs:
+    if args.resample_Fs and args.resample_Fs > 0:
         po.resample(args.resample_Fs)
+    elif args.resample_Fs == 0:
+        po.print('resample skipped (--resample_Fs 0); keeping native simulation rate')
 
     fcut_lowpass = min(args.fcut_lowpass,FREQ_MAX_HZ)
     if fcut_lowpass>0:
