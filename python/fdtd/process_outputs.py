@@ -16,6 +16,7 @@
 import numpy as np
 from numpy import array as npa
 from pathlib import Path
+import time
 import h5py
 import matplotlib.pyplot as plt
 from scipy.signal import butter,bilinear_zpk,zpk2sos,sosfilt,lfilter
@@ -27,6 +28,9 @@ from air_abs.visco_filter import apply_visco_filter
 from air_abs.modal_filter import apply_modal_filter
 from air_abs.ola_filter import apply_ola_filter
 from common.myfuncs import wavwrite,iceil,iround
+
+FREQ_MIN_HZ = 20.0
+FREQ_MAX_HZ = 20e3
 
 #class to process sim_outs.h5 file
 class ProcessOutputs: 
@@ -134,6 +138,8 @@ class ProcessOutputs:
     def apply_lowpass(self,fcut,N_order=8,symmetric=True):
         Ts_f = self.Ts_f
         r_out_f = self.r_out_f
+        nyquist_hz = 0.5/self.Ts_f
+        fcut = min(fcut,FREQ_MAX_HZ,0.999*nyquist_hz)
 
         if symmetric: #will be run twice
             assert N_order%2==0
@@ -255,18 +261,75 @@ class ProcessOutputs:
 
         ax = fig.add_subplot(2, 1, 2)
         r_out_f_fft_dB = 20*log10(np.abs(rfft(r_out_f,Nfft,axis=-1))+np.spacing(1))
+        freq_mask = (fv>=FREQ_MIN_HZ) & (fv<=FREQ_MAX_HZ)
+        if not np.any(freq_mask):
+            raise ValueError('No FFT bins in the 20 Hz to 20 kHz range')
+        fv_plot = fv[freq_mask]
+        r_out_f_fft_dB = r_out_f_fft_dB[:,freq_mask]
         dB_max = np.max(r_out_f_fft_dB)
         for i in range(r_out_f.shape[0]):
-            ax.plot(fv,r_out_f_fft_dB[i],linestyle='-',label=f'R{i+1}')
+            ax.plot(fv_plot,r_out_f_fft_dB[i],linestyle='-',label=f'R{i+1}')
         ax.set_title('r_out filtered')
         ax.margins(0, 0.1)
         ax.set_xlabel('freq (Hz)')
         ax.set_ylabel('dB')
         ax.set_xscale('log')
         ax.set_ylim((dB_max-80,dB_max+10))
-        ax.set_xlim((1,Fs_f/2))
+        ax.set_xlim((FREQ_MIN_HZ,min(FREQ_MAX_HZ,Fs_f/2)))
         ax.grid(which='both', axis='both')
         ax.legend()
+
+    def benchmark_frequency_bounded_calculation(self,repeats=25):
+        if self.r_out_f is None:
+            raise RuntimeError('Run initial_process() before benchmarking')
+        if repeats < 1:
+            raise ValueError('repeats must be >= 1')
+
+        r_out_f = self.r_out_f
+        Nt_f = self.Nt_f
+        Fs_f = self.Fs_f
+        Nfft = 2**iceil(log2(Nt_f))
+        fv = np.arange(np.int_(Nfft//2)+1)/Nfft*Fs_f
+        freq_mask = (fv>=FREQ_MIN_HZ) & (fv<=FREQ_MAX_HZ)
+        if not np.any(freq_mask):
+            raise ValueError('No FFT bins in the 20 Hz to 20 kHz range')
+
+        # Legacy: full-band FFT dB calculation used before the 20-20k bound.
+        t0 = time.perf_counter()
+        for _ in range(repeats):
+            legacy_fft_db = 20*log10(np.abs(rfft(r_out_f,Nfft,axis=-1))+np.spacing(1))
+            np.max(legacy_fft_db)
+        t_legacy = time.perf_counter()-t0
+
+        # New: same FFT followed by restricting calculations to 20Hz-20kHz bins.
+        t1 = time.perf_counter()
+        for _ in range(repeats):
+            bounded_fft_db = 20*log10(np.abs(rfft(r_out_f,Nfft,axis=-1))+np.spacing(1))
+            bounded_fft_db = bounded_fft_db[:,freq_mask]
+            np.max(bounded_fft_db)
+        t_bounded = time.perf_counter()-t1
+
+        legacy_avg = t_legacy/repeats
+        bounded_avg = t_bounded/repeats
+        speedup = legacy_avg/max(bounded_avg,np.finfo(float).tiny)
+        ratio = freq_mask.sum()/freq_mask.size
+
+        self.print('benchmark: original vs bounded frequency calculation')
+        self.print(f'repeats={repeats}, bins_kept={freq_mask.sum()}/{freq_mask.size} ({100*ratio:.2f}%)')
+        self.print(f'legacy total={t_legacy:.6f}s, avg={legacy_avg:.6e}s')
+        self.print(f'bounded total={t_bounded:.6f}s, avg={bounded_avg:.6e}s')
+        self.print(f'speedup(legacy/bounded)={speedup:.3f}x')
+
+        return {
+            'repeats': repeats,
+            'legacy_total_s': t_legacy,
+            'legacy_avg_s': legacy_avg,
+            'bounded_total_s': t_bounded,
+            'bounded_avg_s': bounded_avg,
+            'speedup_legacy_over_bounded': speedup,
+            'bins_kept': int(freq_mask.sum()),
+            'bins_total': int(freq_mask.size),
+        }
 
     def show_plots(self):
         plt.show()
@@ -310,6 +373,8 @@ def main():
     parser.add_argument('--symmetric_lowpass',action='store_true',help='make symmetric FIR out of IIR (N_order even)')
     parser.add_argument('--air_abs_filter', type=str,help='stokes, modal, OLA, or none  ')
     parser.add_argument('--save_wav', action='store_true',help='save WAV files of processed outputs')
+    parser.add_argument('--benchmark_freq_bounds', action='store_true',help='benchmark legacy full-band vs 20Hz-20kHz bounded calc')
+    parser.add_argument('--benchmark_repeats', type=int,help='number of repeated runs for benchmark')
     parser.set_defaults(plot=False)
     parser.set_defaults(plot_raw=False)
     parser.set_defaults(data_dir=None)
@@ -318,21 +383,25 @@ def main():
     parser.set_defaults(save_wav=False)
     parser.set_defaults(N_order_lowpass=8)
     parser.set_defaults(N_order_lowcut=8)
-    parser.set_defaults(fcut_lowcut=10.0)
-    parser.set_defaults(fcut_lowpass=0.0)
+    parser.set_defaults(fcut_lowcut=FREQ_MIN_HZ)
+    parser.set_defaults(fcut_lowpass=FREQ_MAX_HZ)
     parser.set_defaults(symmetric_lowpass=False)
+    parser.set_defaults(benchmark_freq_bounds=False)
+    parser.set_defaults(benchmark_repeats=25)
 
     args = parser.parse_args()
 
     po = ProcessOutputs(args.data_dir)
 
-    po.initial_process(fcut=args.fcut_lowcut,N_order=args.N_order_lowcut)
+    fcut_lowcut = max(args.fcut_lowcut,FREQ_MIN_HZ)
+    po.initial_process(fcut=fcut_lowcut,N_order=args.N_order_lowcut)
 
     if args.resample_Fs:
         po.resample(args.resample_Fs)
 
-    if args.fcut_lowpass>0:
-        po.apply_lowpass(fcut=args.fcut_lowpass,N_order=args.N_order_lowpass,symmetric=args.symmetric_lowpass)
+    fcut_lowpass = min(args.fcut_lowpass,FREQ_MAX_HZ)
+    if fcut_lowpass>0:
+        po.apply_lowpass(fcut=fcut_lowpass,N_order=args.N_order_lowpass,symmetric=args.symmetric_lowpass)
 
     #these are only needed if you're simulating with fmax >1kHz, but generally fine to use
     if args.air_abs_filter.lower() == 'modal': #best, but slowest
@@ -341,6 +410,9 @@ def main():
         po.apply_stokes_filter()
     elif args.air_abs_filter.lower() == 'ola': #fastest, but not as recommended
         po.apply_ola_filter()
+
+    if args.benchmark_freq_bounds:
+        po.benchmark_frequency_bounded_calculation(repeats=args.benchmark_repeats)
 
     po.save_h5()
 
